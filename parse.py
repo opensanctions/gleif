@@ -91,25 +91,25 @@ def fetch_bic_mapping() -> Path:
     return fetch_file(csv_url, "bic_lei.csv")
 
 
-def fetch_cat_file(url_part: str) -> Optional[Path]:
+def fetch_cat_file(url_part: str, name: str) -> Optional[Path]:
     res = requests.get(CAT_URL)
     doc = html.fromstring(res.text)
     for link in doc.findall(".//a"):
         url = urljoin(BIC_URL, link.get("href"))
         if url_part in url:
-            return fetch_file(url, "lei.zip")
+            return fetch_file(url, name)
     return None
 
 
 def fetch_lei_file() -> Path:
-    path = fetch_cat_file("/concatenated-files/lei2/get/")
+    path = fetch_cat_file("/concatenated-files/lei2/get/", "lei.zip")
     if path is None:
         raise RuntimeError("Cannot find cat LEI2 file!")
     return path
 
 
 def fetch_rr_file() -> Path:
-    path = fetch_cat_file("/concatenated-files/rr/get/")
+    path = fetch_cat_file("/concatenated-files/rr/get/", "rr.zip")
     if path is None:
         raise RuntimeError("Cannot find cat RR file!")
     return path
@@ -119,6 +119,7 @@ def fetch_rr_file() -> Path:
 def read_zip_xml(path: Path):
     with ZipFile(path, "r") as zip:
         for name in zip.namelist():
+            log.info("Reading: %s in %s", name, path)
             with zip.open(name, "r") as fh:
                 yield fh
 
@@ -236,15 +237,18 @@ def parse_rr_file(fh: BinaryIO) -> Generator[EntityProxy, None, None]:
         el.clear()
         yield proxy
 
+    if idx == 0:
+        raise RuntimeError("No relationships!")
+
 
 def parse():
     out_path = DATA / "export" / "gleif.json"
     out_path.parent.mkdir(exist_ok=True, parents=True)
     with open(out_path, "w") as out_fh:
-        lei_file = fetch_lei_file()
-        with read_zip_xml(lei_file) as fh:
-            for proxy in parse_lei_file(fh):
-                write_object(out_fh, proxy)
+        # lei_file = fetch_lei_file()
+        # with read_zip_xml(lei_file) as fh:
+        #     for proxy in parse_lei_file(fh):
+        #         write_object(out_fh, proxy)
 
         rr_file = fetch_rr_file()
         with read_zip_xml(rr_file) as fh:
