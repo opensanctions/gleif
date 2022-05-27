@@ -245,10 +245,10 @@ def parse():
     out_path = DATA / "export" / "gleif.json"
     out_path.parent.mkdir(exist_ok=True, parents=True)
     with open(out_path, "w") as out_fh:
-        # lei_file = fetch_lei_file()
-        # with read_zip_xml(lei_file) as fh:
-        #     for proxy in parse_lei_file(fh):
-        #         write_object(out_fh, proxy)
+        lei_file = fetch_lei_file()
+        with read_zip_xml(lei_file) as fh:
+            for proxy in parse_lei_file(fh):
+                write_object(out_fh, proxy)
 
         rr_file = fetch_rr_file()
         with read_zip_xml(rr_file) as fh:
