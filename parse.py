@@ -158,6 +158,7 @@ def parse_lei_file(fh: BinaryIO) -> Generator[EntityProxy, None, None]:
         reg_id = authority.findtext("RegistrationAuthorityEntityID")
         proxy.add("registrationNumber", reg_id)
         proxy.add("swiftBic", bics.get(lei))
+        proxy.add("leiCode", lei, quiet=True)
 
         legal_form = entity.find("LegalForm")
         code = legal_form.findtext("EntityLegalFormCode")
@@ -238,7 +239,7 @@ def parse_rr_file(fh: BinaryIO) -> Generator[EntityProxy, None, None]:
 
 def parse():
     out_path = DATA / "export" / "gleif.json"
-    out_path.parent.mkdir(exist_ok=True)
+    out_path.parent.mkdir(exist_ok=True, parents=True)
     with open(out_path, "w") as out_fh:
         lei_file = fetch_lei_file()
         with read_zip_xml(lei_file) as fh:
