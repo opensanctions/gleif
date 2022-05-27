@@ -1,15 +1,17 @@
 import csv
 import logging
 import requests
-from urllib.parse import urljoin
 from pathlib import Path
-from typing import Generator, BinaryIO, Dict, List, Optional, Tuple
+from zipfile import ZipFile
 from lxml import etree, html
 from normality import slugify
+from urllib.parse import urljoin
+from contextlib import contextmanager
+from typing import Generator, BinaryIO, Dict, List, Optional, Tuple
 
 from followthemoney import model
 from followthemoney.proxy import EntityProxy
-from followthemoney.types import registry
+from followthemoney.cli.util import write_object
 
 log = logging.getLogger("gleifparse")
 DATA = Path("data/").resolve()
@@ -32,10 +34,10 @@ RELATIONSHIPS: Dict[str, Tuple[str, str, str]] = {
 
 
 def fetch_file(url: str, name: str) -> Path:
-    log.info("Fetching: %s", url)
     out_path = DATA / name
     if out_path.exists():
         return out_path
+    log.info("Fetching: %s", url)
     with requests.get(url, stream=True) as res:
         res.raise_for_status()
         with open(out_path, "wb") as fh:
@@ -87,6 +89,38 @@ def fetch_bic_mapping() -> Path:
     if csv_url is None:
         raise RuntimeError("No BIC/LEI mapping file found!")
     return fetch_file(csv_url, "bic_lei.csv")
+
+
+def fetch_cat_file(url_part: str) -> Optional[Path]:
+    res = requests.get(CAT_URL)
+    doc = html.fromstring(res.text)
+    for link in doc.findall(".//a"):
+        url = urljoin(BIC_URL, link.get("href"))
+        if url_part in url:
+            return fetch_file(url, "lei.zip")
+    return None
+
+
+def fetch_lei_file() -> Path:
+    path = fetch_cat_file("/concatenated-files/lei2/get/")
+    if path is None:
+        raise RuntimeError("Cannot find cat LEI2 file!")
+    return path
+
+
+def fetch_rr_file() -> Path:
+    path = fetch_cat_file("/concatenated-files/rr/get/")
+    if path is None:
+        raise RuntimeError("Cannot find cat RR file!")
+    return path
+
+
+@contextmanager
+def read_zip_xml(path: Path):
+    with ZipFile(path, "r") as zip:
+        for name in zip.namelist():
+            with zip.open(name, "r") as fh:
+                yield fh
 
 
 def load_bic_mapping() -> Dict[str, List[str]]:
@@ -202,13 +236,21 @@ def parse_rr_file(fh: BinaryIO) -> Generator[EntityProxy, None, None]:
         yield proxy
 
 
+def parse():
+    out_path = DATA / "export" / "gleif.json"
+    out_path.parent.mkdir(exist_ok=True)
+    with open(out_path, "w") as out_fh:
+        lei_file = fetch_lei_file()
+        with read_zip_xml(lei_file) as fh:
+            for proxy in parse_lei_file(fh):
+                write_object(out_fh, proxy)
+
+        rr_file = fetch_rr_file()
+        with read_zip_xml(rr_file) as fh:
+            for proxy in parse_rr_file(fh):
+                write_object(out_fh, proxy)
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-
-    with open("data/20220518-gleif-concatenated-file-lei2.xml", "rb") as fh:
-        for proxy in parse_lei_file(fh):
-            pass
-    # with open("data/20220518-gleif-concatenated-file-rr.xml", "rb") as fh:
-    #     for proxy in parse_rr_file(fh):
-    #         # pprint(proxy.to_dict())
-    #         pass
+    parse()
