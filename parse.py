@@ -214,7 +214,8 @@ def parse_rr_file(fh: BinaryIO) -> Generator[EntityProxy, None, None]:
         end_lei = end_node.findtext("NodeID")
 
         proxy = model.make_entity(rel_schema)
-        proxy.id = f"lei-rel-{start_lei}-{end_lei}"
+        rel_id = slugify(rel_type, sep="-")
+        proxy.id = f"lei-{start_lei}-{rel_id}-{end_lei}"
         proxy.add(start_prop, lei_id(start_lei))
         proxy.add(end_prop, lei_id(end_lei))
         proxy.add("role", rel_type.replace("_", " "))
