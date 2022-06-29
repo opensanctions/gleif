@@ -1,5 +1,4 @@
 import csv
-import logging
 import requests
 from pathlib import Path
 from zipfile import ZipFile
@@ -7,14 +6,11 @@ from lxml import etree, html
 from normality import slugify
 from urllib.parse import urljoin
 from contextlib import contextmanager
-from typing import Generator, BinaryIO, Dict, List, Optional, Tuple
-
+from typing import BinaryIO, Dict, List, Optional, Tuple
 from followthemoney import model
-from followthemoney.proxy import EntityProxy
-from followthemoney.cli.util import write_object
+from zavod import Zavod, init_context
+from zavod.parse import remove_namespace
 
-log = logging.getLogger("gleifparse")
-DATA = Path("data/").resolve()
 LEI = "http://www.gleif.org/data/schema/leidata/2016"
 RR = "http://www.gleif.org/data/schema/rr/2016"
 
@@ -33,19 +29,6 @@ RELATIONSHIPS: Dict[str, Tuple[str, str, str]] = {
 }
 
 
-def fetch_file(url: str, name: str) -> Path:
-    out_path = DATA / name
-    if out_path.exists():
-        return out_path
-    log.info("Fetching: %s", url)
-    with requests.get(url, stream=True) as res:
-        res.raise_for_status()
-        with open(out_path, "wb") as fh:
-            for chunk in res.iter_content(chunk_size=8192):
-                fh.write(chunk)
-    return out_path
-
-
 def load_elfs() -> Dict[str, str]:
     names = {}
     # https://www.gleif.org/en/about-lei/code-lists/iso-20275-entity-legal-forms-code-list#
@@ -59,13 +42,6 @@ def load_elfs() -> Dict[str, str]:
     return names
 
 
-def remove_namespace(el):
-    for elem in el.getiterator():
-        elem.tag = etree.QName(elem).localname
-    etree.cleanup_namespaces(el)
-    return el
-
-
 def lei_id(lei: str) -> str:
     return f"lei-{lei}"
 
@@ -76,7 +52,7 @@ def parse_date(text: Optional[str]) -> Optional[str]:
     return text.split("T")[0]
 
 
-def fetch_bic_mapping() -> Path:
+def fetch_bic_mapping(context: Zavod) -> Path:
     res = requests.get(BIC_URL)
     doc = html.fromstring(res.text)
     csv_url = None
@@ -88,44 +64,44 @@ def fetch_bic_mapping() -> Path:
                 break
     if csv_url is None:
         raise RuntimeError("No BIC/LEI mapping file found!")
-    return fetch_file(csv_url, "bic_lei.csv")
+    return context.fetch_resource("bic_lei.csv", csv_url)
 
 
-def fetch_cat_file(url_part: str, name: str) -> Optional[Path]:
+def fetch_cat_file(context: Zavod, url_part: str, name: str) -> Optional[Path]:
     res = requests.get(CAT_URL)
     doc = html.fromstring(res.text)
     for link in doc.findall(".//a"):
         url = urljoin(BIC_URL, link.get("href"))
         if url_part in url:
-            return fetch_file(url, name)
+            return context.fetch_resource(name, url)
     return None
 
 
-def fetch_lei_file() -> Path:
-    path = fetch_cat_file("/concatenated-files/lei2/get/", "lei.zip")
+def fetch_lei_file(context: Zavod) -> Path:
+    path = fetch_cat_file(context, "/concatenated-files/lei2/get/", "lei.zip")
     if path is None:
         raise RuntimeError("Cannot find cat LEI2 file!")
     return path
 
 
-def fetch_rr_file() -> Path:
-    path = fetch_cat_file("/concatenated-files/rr/get/", "rr.zip")
+def fetch_rr_file(context: Zavod) -> Path:
+    path = fetch_cat_file(context, "/concatenated-files/rr/get/", "rr.zip")
     if path is None:
         raise RuntimeError("Cannot find cat RR file!")
     return path
 
 
 @contextmanager
-def read_zip_xml(path: Path):
+def read_zip_xml(context: Zavod, path: Path):
     with ZipFile(path, "r") as zip:
         for name in zip.namelist():
-            log.info("Reading: %s in %s", name, path)
+            context.log.info("Reading: %s in %s", name, path)
             with zip.open(name, "r") as fh:
                 yield fh
 
 
-def load_bic_mapping() -> Dict[str, List[str]]:
-    csv_path = fetch_bic_mapping()
+def load_bic_mapping(context: Zavod) -> Dict[str, List[str]]:
+    csv_path = fetch_bic_mapping(context)
     mapping: Dict[str, List[str]] = {}
     with open(csv_path, "r") as fh:
         for row in csv.DictReader(fh):
@@ -139,36 +115,44 @@ def load_bic_mapping() -> Dict[str, List[str]]:
     return mapping
 
 
-def parse_lei_file(fh: BinaryIO) -> Generator[EntityProxy, None, None]:
+def parse_lei_file(context: Zavod, fh: BinaryIO):
     elfs = load_elfs()
-    bics = load_bic_mapping()
+    bics = load_bic_mapping(context)
     for idx, (_, el) in enumerate(etree.iterparse(fh, tag="{%s}LEIRecord" % LEI)):
         if idx > 0 and idx % 10000 == 0:
-            log.info("Parse LEIRecord: %d...", idx)
+            context.log.info("Parse LEIRecord: %d...", idx)
         elc = remove_namespace(el)
         proxy = model.make_entity("Company")
         lei = elc.findtext("LEI")
+        if lei is None:
+            continue
         proxy.id = lei_id(lei)
         entity = elc.find("Entity")
+        if entity is None:
+            continue
         proxy.add("name", entity.findtext("LegalName"))
         proxy.add("jurisdiction", entity.findtext("LegalJurisdiction"))
         proxy.add("status", entity.findtext("EntityStatus"))
         create_date = parse_date(entity.findtext("EntityCreationDate"))
         proxy.add("incorporationDate", create_date)
         authority = entity.find("RegistrationAuthority")
-        reg_id = authority.findtext("RegistrationAuthorityEntityID")
-        proxy.add("registrationNumber", reg_id)
-        proxy.add("swiftBic", bics.get(lei))
-        proxy.add("leiCode", lei, quiet=True)
+        if authority is not None:
+            reg_id = authority.findtext("RegistrationAuthorityEntityID")
+            proxy.add("registrationNumber", reg_id)
+            proxy.add("swiftBic", bics.get(lei))
+            proxy.add("leiCode", lei, quiet=True)
 
         legal_form = entity.find("LegalForm")
-        code = legal_form.findtext("EntityLegalFormCode")
-        proxy.add("legalForm", elfs.get(code))
-        proxy.add("legalForm", legal_form.findtext("OtherLegalForm"))
+        if legal_form is not None:
+            code = legal_form.findtext("EntityLegalFormCode")
+            proxy.add("legalForm", elfs.get(code))
+            proxy.add("legalForm", legal_form.findtext("OtherLegalForm"))
 
         registration = elc.find("Registration")
-        mod_date = parse_date(registration.findtext("LastUpdateDate"))
-        proxy.add("modifiedAt", mod_date)
+        if registration is not None:
+            mod_date = parse_date(registration.findtext("LastUpdateDate"))
+            proxy.add("modifiedAt", mod_date)
+
         # pprint(proxy.to_dict())
 
         successor = elc.find("SuccessorEntity")
@@ -181,35 +165,37 @@ def parse_lei_file(fh: BinaryIO) -> Generator[EntityProxy, None, None]:
             yield succession
 
         el.clear()
-        yield proxy
+        context.emit(proxy)
 
     if idx == 0:
         raise RuntimeError("No entities!")
 
 
-def parse_rr_file(fh: BinaryIO) -> Generator[EntityProxy, None, None]:
+def parse_rr_file(context: Zavod, fh: BinaryIO):
     tag = "{%s}RelationshipRecord" % RR
     for idx, (_, el) in enumerate(etree.iterparse(fh, tag=tag)):
         if idx > 0 and idx % 10000 == 0:
-            log.info("Parse RelationshipRecord: %d...", idx)
+            context.log.info("Parse RelationshipRecord: %d...", idx)
         elc = remove_namespace(el)
         # print(elc)
         rel = elc.find("Relationship")
+        if rel is None:
+            continue
         rel_type = rel.findtext("RelationshipType")
         rel_data = RELATIONSHIPS.get(rel_type)
         if rel_data is None:
-            log.warning("Unknown relationship: %s", rel_type)
+            context.log.warn("Unknown relationship: %s", rel_type)
             continue
         rel_schema, start_prop, end_prop = rel_data
 
         start_node = rel.find("StartNode")
         if start_node.findtext("NodeIDType") != "LEI":
-            log.warning("Unknown edge type: %s", start_node.findtext("NodeIDType"))
+            context.log.warn("Unknown edge type: %s", start_node.findtext("NodeIDType"))
             continue
         start_lei = start_node.findtext("NodeID")
         end_node = rel.find("EndNode")
         if end_node.findtext("NodeIDType") != "LEI":
-            log.warning("Unknown edge type: %s", end_node.findtext("NodeIDType"))
+            context.log.warn("Unknown edge type: %s", end_node.findtext("NodeIDType"))
             continue
         end_lei = end_node.findtext("NodeID")
 
@@ -233,30 +219,25 @@ def parse_rr_file(fh: BinaryIO) -> Generator[EntityProxy, None, None]:
             if units == "PERCENTAGE" or units is None:
                 proxy.add("percentage", amount, quiet=True)
             else:
-                log.warning("Unknown rel quantifier: %s %s", amount, units)
+                context.log.warn("Unknown rel quantifier: %s %s", amount, units)
 
         el.clear()
-        yield proxy
+        context.emit(proxy)
 
     if idx == 0:
         raise RuntimeError("No relationships!")
 
 
-def parse():
-    out_path = DATA / "export" / "gleif.json"
-    out_path.parent.mkdir(exist_ok=True, parents=True)
-    with open(out_path, "w") as out_fh:
-        lei_file = fetch_lei_file()
-        with read_zip_xml(lei_file) as fh:
-            for proxy in parse_lei_file(fh):
-                write_object(out_fh, proxy)
+def parse(context: Zavod):
+    lei_file = fetch_lei_file(context)
+    with read_zip_xml(context, lei_file) as fh:
+        parse_lei_file(context, fh)
 
-        rr_file = fetch_rr_file()
-        with read_zip_xml(rr_file) as fh:
-            for proxy in parse_rr_file(fh):
-                write_object(out_fh, proxy)
+    rr_file = fetch_rr_file(context)
+    with read_zip_xml(context, rr_file) as fh:
+        parse_rr_file(context, fh)
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    parse()
+    with init_context("gleif", "lei") as context:
+        parse(context)
