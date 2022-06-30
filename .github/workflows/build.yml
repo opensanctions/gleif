@@ -27,6 +27,12 @@ jobs:
       - name: Parse and write the LEI data
         run: |
           python parse.py
+      - name: Aggregate fragmented entities
+        run: |
+          mkdir -p data/export
+          sort -o data/sorted.json data/fragments.json
+          rm data/fragments.json
+          ftm sorted-aggregate -i data/sorted.json -o data/export/data.json
       - name: Publish data to data.opensanctions.org
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}

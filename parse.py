@@ -95,7 +95,7 @@ def fetch_rr_file(context: Zavod) -> Path:
 def read_zip_xml(context: Zavod, path: Path):
     with ZipFile(path, "r") as zip:
         for name in zip.namelist():
-            context.log.info("Reading: %s in %s", name, path)
+            context.log.info("Reading: %s in %s" % (name, path))
             with zip.open(name, "r") as fh:
                 yield fh
 
@@ -115,12 +115,12 @@ def load_bic_mapping(context: Zavod) -> Dict[str, List[str]]:
     return mapping
 
 
-def parse_lei_file(context: Zavod, fh: BinaryIO):
+def parse_lei_file(context: Zavod, fh: BinaryIO) -> None:
     elfs = load_elfs()
     bics = load_bic_mapping(context)
     for idx, (_, el) in enumerate(etree.iterparse(fh, tag="{%s}LEIRecord" % LEI)):
         if idx > 0 and idx % 10000 == 0:
-            context.log.info("Parse LEIRecord: %d...", idx)
+            context.log.info("Parse LEIRecord: %d..." % idx)
         elc = remove_namespace(el)
         proxy = model.make_entity("Company")
         lei = elc.findtext("LEI")
@@ -162,7 +162,7 @@ def parse_lei_file(context: Zavod, fh: BinaryIO):
             succession.id = f"lei-succession-{lei}-{succ_lei}"
             succession.add("predecessor", lei)
             succession.add("successor", lei_id(succ_lei))
-            yield succession
+            context.emit(succession)
 
         el.clear()
         context.emit(proxy)
@@ -175,7 +175,7 @@ def parse_rr_file(context: Zavod, fh: BinaryIO):
     tag = "{%s}RelationshipRecord" % RR
     for idx, (_, el) in enumerate(etree.iterparse(fh, tag=tag)):
         if idx > 0 and idx % 10000 == 0:
-            context.log.info("Parse RelationshipRecord: %d...", idx)
+            context.log.info("Parse RelationshipRecord: %d..." % idx)
         elc = remove_namespace(el)
         # print(elc)
         rel = elc.find("Relationship")
@@ -189,13 +189,15 @@ def parse_rr_file(context: Zavod, fh: BinaryIO):
         rel_schema, start_prop, end_prop = rel_data
 
         start_node = rel.find("StartNode")
-        if start_node.findtext("NodeIDType") != "LEI":
-            context.log.warn("Unknown edge type: %s", start_node.findtext("NodeIDType"))
+        start_node_type = start_node.findtext("NodeIDType")
+        if start_node_type != "LEI":
+            context.log.warn("Unknown edge type", node_id_type=start_node_type)
             continue
         start_lei = start_node.findtext("NodeID")
         end_node = rel.find("EndNode")
-        if end_node.findtext("NodeIDType") != "LEI":
-            context.log.warn("Unknown edge type: %s", end_node.findtext("NodeIDType"))
+        end_node_type = end_node.findtext("NodeIDType")
+        if end_node_type != "LEI":
+            context.log.warn("Unknown edge type", node_id_type=end_node_type)
             continue
         end_lei = end_node.findtext("NodeID")
 
@@ -219,7 +221,7 @@ def parse_rr_file(context: Zavod, fh: BinaryIO):
             if units == "PERCENTAGE" or units is None:
                 proxy.add("percentage", amount, quiet=True)
             else:
-                context.log.warn("Unknown rel quantifier: %s %s", amount, units)
+                context.log.warn("Unknown rel quantifier", amount=amount, units=units)
 
         el.clear()
         context.emit(proxy)
