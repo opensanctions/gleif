@@ -1,4 +1,5 @@
 import csv
+from io import TextIOWrapper
 import requests
 from pathlib import Path
 from zipfile import ZipFile
@@ -16,6 +17,7 @@ RR = "http://www.gleif.org/data/schema/rr/2016"
 
 CAT_URL = "https://www.gleif.org/en/lei-data/gleif-concatenated-file/download-the-concatenated-file"
 BIC_URL = "https://www.gleif.org/en/lei-data/lei-mapping/download-bic-to-lei-relationship-files"
+ISIN_URL = "https://www.gleif.org/en/lei-data/lei-mapping/download-isin-to-lei-relationship-files"
 
 # TODO: addresses!
 
@@ -67,6 +69,20 @@ def fetch_bic_mapping(context: Zavod) -> Path:
     return context.fetch_resource("bic_lei.csv", csv_url)
 
 
+def fetch_isin_mapping(context: Zavod) -> Path:
+    res = requests.get(ISIN_URL)
+    doc = html.fromstring(res.text)
+    mapping_url = None
+    for link in doc.findall(".//a"):
+        url = urljoin(BIC_URL, link.get("href"))
+        if "https://mapping.gleif.org/api/v2/isin-lei/" in url:
+            mapping_url = url
+            break
+    if mapping_url is None:
+        raise RuntimeError("No ISIN mapping file found!")
+    return context.fetch_resource("isin.zip", mapping_url)
+
+
 def fetch_cat_file(context: Zavod, url_part: str, name: str) -> Optional[Path]:
     res = requests.get(CAT_URL)
     doc = html.fromstring(res.text)
@@ -92,7 +108,7 @@ def fetch_rr_file(context: Zavod) -> Path:
 
 
 @contextmanager
-def read_zip_xml(context: Zavod, path: Path):
+def read_zip_file(context: Zavod, path: Path):
     with ZipFile(path, "r") as zip:
         for name in zip.namelist():
             context.log.info("Reading: %s in %s" % (name, path))
@@ -115,9 +131,26 @@ def load_bic_mapping(context: Zavod) -> Dict[str, List[str]]:
     return mapping
 
 
+def load_isin_mapping(context: Zavod) -> Dict[str, List[str]]:
+    zip_path = fetch_isin_mapping(context)
+    mapping: Dict[str, List[str]] = {}
+    with read_zip_file(context, zip_path) as fh:
+        textfh = TextIOWrapper(fh, encoding='utf-8')
+        for row in csv.DictReader(textfh):
+            lei = row.get("LEI")
+            if lei is None:
+                raise RuntimeError("No LEI in BIC/LEI mapping")
+            mapping.setdefault(lei, [])
+            isin = row.get("ISIN")
+            if isin is not None:
+                mapping[lei].append(isin)
+    return mapping
+
+
 def parse_lei_file(context: Zavod, fh: BinaryIO) -> None:
     elfs = load_elfs()
     bics = load_bic_mapping(context)
+    isins = load_isin_mapping(context)
     for idx, (_, el) in enumerate(etree.iterparse(fh, tag="{%s}LEIRecord" % LEI)):
         if idx > 0 and idx % 10000 == 0:
             context.log.info("Parse LEIRecord: %d..." % idx)
@@ -139,8 +172,16 @@ def parse_lei_file(context: Zavod, fh: BinaryIO) -> None:
         if authority is not None:
             reg_id = authority.findtext("RegistrationAuthorityEntityID")
             proxy.add("registrationNumber", reg_id)
-            proxy.add("swiftBic", bics.get(lei))
-            proxy.add("leiCode", lei, quiet=True)
+            
+        proxy.add("swiftBic", bics.get(lei))
+        proxy.add("leiCode", lei, quiet=True)
+
+        for isin in isins.get(lei, []):
+            security = model.make_entity("Security")
+            security.id = f"lei-isin-{isin}"
+            security.add('isin', isin)
+            security.add('issuer', proxy.id)
+            context.emit(security)
 
         legal_form = entity.find("LegalForm")
         if legal_form is not None:
@@ -232,11 +273,11 @@ def parse_rr_file(context: Zavod, fh: BinaryIO):
 
 def parse(context: Zavod):
     lei_file = fetch_lei_file(context)
-    with read_zip_xml(context, lei_file) as fh:
+    with read_zip_file(context, lei_file) as fh:
         parse_lei_file(context, fh)
 
     rr_file = fetch_rr_file(context)
-    with read_zip_xml(context, rr_file) as fh:
+    with read_zip_file(context, rr_file) as fh:
         parse_rr_file(context, fh)
 
 
