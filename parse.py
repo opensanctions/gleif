@@ -135,7 +135,7 @@ def load_isin_mapping(context: Zavod) -> Dict[str, List[str]]:
     zip_path = fetch_isin_mapping(context)
     mapping: Dict[str, List[str]] = {}
     with read_zip_file(context, zip_path) as fh:
-        textfh = TextIOWrapper(fh, encoding='utf-8')
+        textfh = TextIOWrapper(fh, encoding="utf-8")
         for row in csv.DictReader(textfh):
             lei = row.get("LEI")
             if lei is None:
@@ -172,15 +172,16 @@ def parse_lei_file(context: Zavod, fh: BinaryIO) -> None:
         if authority is not None:
             reg_id = authority.findtext("RegistrationAuthorityEntityID")
             proxy.add("registrationNumber", reg_id)
-            
+
         proxy.add("swiftBic", bics.get(lei))
         proxy.add("leiCode", lei, quiet=True)
 
         for isin in isins.get(lei, []):
             security = model.make_entity("Security")
             security.id = f"lei-isin-{isin}"
-            security.add('isin', isin)
-            security.add('issuer', proxy.id)
+            security.add("isin", isin)
+            security.add("issuer", proxy.id)
+            security.add("country", entity.findtext("LegalJurisdiction"))
             context.emit(security)
 
         legal_form = entity.find("LegalForm")
