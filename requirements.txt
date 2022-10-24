@@ -1,2 +1,3 @@
 lxml
 zavod
+pyicu==2.9
